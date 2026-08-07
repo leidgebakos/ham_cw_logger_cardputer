@@ -1,0 +1,2 @@
+dependencies:
+  espp/m5stack-cardputer: "^1.1.7"
