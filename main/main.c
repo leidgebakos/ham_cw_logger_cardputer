@@ -2,11 +2,12 @@
 #include <stdio.h>
 
 #include "esp_chip_info.h"
-#include "esp_efuse_mac.h"
 #include "esp_flash.h"
 #include "esp_heap_caps.h"
 #include "esp_idf_version.h"
+#include "esp_mac.h"
 #include "esp_log.h"
+#include "esp_system.h"
 
 #define FIRMWARE_VERSION "0.1.0-smoke"
 
@@ -20,7 +21,7 @@ static void print_chip_info(void)
 
     esp_chip_info(&chip_info);
     esp_flash_get_size(NULL, &flash_size);
-    esp_efuse_mac_get_default(mac);
+    esp_read_mac(mac, ESP_MAC_EFUSE_FACTORY);
 
     const char *chip_name = "unknown";
     if (chip_info.model == CHIP_ESP32S3) {
