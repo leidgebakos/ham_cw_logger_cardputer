@@ -99,7 +99,7 @@ bool AdifLog::append(const QsoRecord &record) {
   append_field(line, "QSO_DATE", date);
   append_field(line, "TIME_ON", time);
   append_field(line, "BAND", band);
-  append_field(line, "FREQ", record.frequency_mhz);
+  append_field(line, "FREQ", frequency_mhz_from_khz(record.frequency_khz));
   append_field(line, "MODE", "CW");
   append_field(line, "RST_SENT", record.rst_sent);
   append_field(line, "RST_RCVD", record.rst_received);

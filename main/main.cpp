@@ -20,7 +20,7 @@
 #include "task.hpp"
 
 using namespace std::chrono_literals;
-using ham::logger::band_from_frequency;
+using ham::logger::band_from_frequency_khz;
 
 namespace {
 
@@ -40,8 +40,8 @@ constexpr std::array<const char *, FIELD_COUNT> FIELD_NAMES = {
     "CALL", "FREQ", "RST S", "RST R", "POTA"};
 
 std::recursive_mutex ui_mutex;
-std::array<std::string, FIELD_COUNT> values = {"", "7.032", "599", "599", ""};
-std::array<size_t, FIELD_COUNT> cursors = {0, 5, 3, 3, 0};
+std::array<std::string, FIELD_COUNT> values = {"", "7032", "599", "599", ""};
+std::array<size_t, FIELD_COUNT> cursors = {0, 4, 3, 3, 0};
 std::array<lv_obj_t *, FIELD_COUNT> rows{};
 std::array<lv_obj_t *, FIELD_COUNT> name_labels{};
 std::array<lv_obj_t *, FIELD_COUNT> value_labels{};
@@ -90,8 +90,8 @@ std::string display_value(size_t index) {
     text.insert(cursor, "|");
   }
   if (index == static_cast<size_t>(Field::FREQUENCY)) {
-    text += " MHz  ";
-    text += std::string(band_from_frequency(values[index]));
+    text += " kHz  ";
+    text += std::string(band_from_frequency_khz(values[index]));
   }
   return text;
 }
@@ -250,7 +250,7 @@ void select_field(size_t new_field) {
 
 bool character_allowed(size_t field, char value) {
   if (field == static_cast<size_t>(Field::FREQUENCY)) {
-    return std::isdigit(static_cast<unsigned char>(value)) || value == '.';
+    return std::isdigit(static_cast<unsigned char>(value));
   }
   if (field == static_cast<size_t>(Field::RST_SENT) ||
       field == static_cast<size_t>(Field::RST_RECEIVED)) {
@@ -261,7 +261,7 @@ bool character_allowed(size_t field, char value) {
 
 size_t maximum_length(size_t field) {
   if (field == static_cast<size_t>(Field::CALLSIGN)) return 16;
-  if (field == static_cast<size_t>(Field::FREQUENCY)) return 9;
+  if (field == static_cast<size_t>(Field::FREQUENCY)) return 6;
   if (field == static_cast<size_t>(Field::RST_SENT) ||
       field == static_cast<size_t>(Field::RST_RECEIVED)) return 3;
   return 12;
@@ -294,7 +294,7 @@ void delete_character() {
 void save_qso() {
   const ham::logger::QsoDraft draft{
       .callsign = values[static_cast<size_t>(Field::CALLSIGN)],
-      .frequency_mhz = values[static_cast<size_t>(Field::FREQUENCY)],
+      .frequency_khz = values[static_cast<size_t>(Field::FREQUENCY)],
       .rst_sent = values[static_cast<size_t>(Field::RST_SENT)],
       .rst_received = values[static_cast<size_t>(Field::RST_RECEIVED)],
       .pota_reference = values[static_cast<size_t>(Field::POTA)],
@@ -303,7 +303,7 @@ void save_qso() {
     set_feedback("Enter a callsign");
     return;
   }
-  if (band_from_frequency(draft.frequency_mhz) == "?") {
+  if (band_from_frequency_khz(draft.frequency_khz) == "?") {
     set_feedback("Invalid frequency");
     return;
   }
@@ -327,7 +327,7 @@ void save_qso() {
   char message[96];
   std::snprintf(message, sizeof(message), "#%lu saved: %s  %s %s",
                 static_cast<unsigned long>(qso_count),
-                record->callsign.c_str(), record->frequency_mhz.c_str(),
+                record->callsign.c_str(), record->frequency_khz.c_str(),
                 record->band.c_str());
   set_feedback(message);
   ESP_LOGI(TAG, "%s", message);
