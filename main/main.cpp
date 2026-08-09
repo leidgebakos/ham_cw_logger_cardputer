@@ -1,6 +1,11 @@
+#include <algorithm>
+#include <array>
 #include <chrono>
+#include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
+#include <string>
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -13,10 +18,34 @@ using namespace std::chrono_literals;
 
 namespace {
 
-constexpr char TAG[] = "cardputer_smoke";
+constexpr char TAG[] = "cw_logger_ui";
+
+enum class Field : size_t {
+  CALLSIGN,
+  FREQUENCY,
+  RST_SENT,
+  RST_RECEIVED,
+  POTA,
+  COUNT,
+};
+
+constexpr size_t FIELD_COUNT = static_cast<size_t>(Field::COUNT);
+constexpr std::array<const char *, FIELD_COUNT> FIELD_NAMES = {
+    "CALL", "FREQ", "RST S", "RST R", "POTA"};
+
 std::recursive_mutex ui_mutex;
-lv_obj_t *input_area = nullptr;
-lv_obj_t *status_label = nullptr;
+std::array<std::string, FIELD_COUNT> values = {"", "7.032", "599", "599", ""};
+std::array<size_t, FIELD_COUNT> cursors = {0, 5, 3, 3, 0};
+std::array<lv_obj_t *, FIELD_COUNT> rows{};
+std::array<lv_obj_t *, FIELD_COUNT> name_labels{};
+std::array<lv_obj_t *, FIELD_COUNT> value_labels{};
+std::array<bool, FIELD_COUNT> pristine_defaults = {false, true, true, true, false};
+lv_obj_t *header_label = nullptr;
+lv_obj_t *feedback_label = nullptr;
+size_t active_field = 0;
+std::string edit_original;
+bool edit_original_was_default = false;
+uint32_t mock_qso_count = 0;
 
 espp::Task ui_task({
     .callback =
@@ -29,103 +58,254 @@ espp::Task ui_task({
           cv.wait_for(lock, 16ms);
           return false;
         },
-    .task_config =
-        {
-            .name = "smoke_ui",
-            .stack_size_bytes = 6 * 1024,
-        },
+    .task_config = {.name = "qso_ui", .stack_size_bytes = 6 * 1024},
 });
 
-void create_ui() {
-  std::lock_guard<std::recursive_mutex> lock(ui_mutex);
-
-  lv_obj_t *background = lv_obj_create(lv_screen_active());
-  lv_obj_set_size(background, lv_pct(100), lv_pct(100));
-  lv_obj_center(background);
-  lv_obj_set_style_bg_color(background, lv_color_hex(0xFFD000), LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(background, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_set_style_border_width(background, 0, LV_PART_MAIN);
-  lv_obj_set_style_radius(background, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(background, 3, LV_PART_MAIN);
-
-  lv_obj_t *title = lv_label_create(background);
-  lv_label_set_text(title, "CARDPUTER ADV - KEYBOARD TEST");
-  lv_obj_set_style_text_color(title, lv_color_hex(0x000000), LV_PART_MAIN);
-  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 0);
-
-  input_area = lv_textarea_create(background);
-  lv_obj_set_size(input_area, lv_pct(100), 72);
-  lv_obj_align(input_area, LV_ALIGN_TOP_MID, 0, 20);
-  lv_textarea_set_placeholder_text(input_area, "Type here...");
-  lv_textarea_set_one_line(input_area, false);
-  lv_obj_set_style_bg_color(input_area, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(input_area, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_set_style_border_color(input_area, lv_color_hex(0x0040FF), LV_PART_MAIN);
-  lv_obj_set_style_border_width(input_area, 2, LV_PART_MAIN);
-  lv_obj_set_style_text_color(input_area, lv_color_hex(0x000000), LV_PART_MAIN);
-  lv_obj_remove_flag(input_area, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_state(input_area, LV_STATE_FOCUSED);
-
-  status_label = lv_label_create(background);
-  lv_obj_set_width(status_label, lv_pct(100));
-  lv_label_set_long_mode(status_label, LV_LABEL_LONG_CLIP);
-  lv_obj_set_style_text_color(status_label, lv_color_hex(0x000000), LV_PART_MAIN);
-  lv_obj_align(status_label, LV_ALIGN_BOTTOM_MID, 0, 0);
-  lv_label_set_text(status_label, "Initializing keyboard...");
+const char *band_from_frequency(const std::string &frequency) {
+  char *end = nullptr;
+  const double mhz = std::strtod(frequency.c_str(), &end);
+  if (end == frequency.c_str() || *end != '\0') return "?";
+  if (mhz >= 1.8 && mhz <= 2.0) return "160m";
+  if (mhz >= 3.5 && mhz <= 4.0) return "80m";
+  if (mhz >= 5.25 && mhz <= 5.45) return "60m";
+  if (mhz >= 7.0 && mhz <= 7.3) return "40m";
+  if (mhz >= 10.1 && mhz <= 10.15) return "30m";
+  if (mhz >= 14.0 && mhz <= 14.35) return "20m";
+  if (mhz >= 18.068 && mhz <= 18.168) return "17m";
+  if (mhz >= 21.0 && mhz <= 21.45) return "15m";
+  if (mhz >= 24.89 && mhz <= 24.99) return "12m";
+  if (mhz >= 28.0 && mhz <= 29.7) return "10m";
+  if (mhz >= 50.0 && mhz <= 54.0) return "6m";
+  return "?";
 }
 
-void set_status(const char *text) {
+std::string display_value(size_t index) {
+  std::string text = values[index].empty() ? "-" : values[index];
+  if (index == active_field) {
+    const size_t cursor = values[index].empty() ? 0 : std::min(cursors[index], text.size());
+    text.insert(cursor, "|");
+  }
+  if (index == static_cast<size_t>(Field::FREQUENCY)) {
+    text += " MHz  ";
+    text += band_from_frequency(values[index]);
+  }
+  return text;
+}
+
+void refresh_rows() {
+  for (size_t i = 0; i < FIELD_COUNT; ++i) {
+    const bool active = i == active_field;
+    lv_obj_set_style_bg_color(rows[i],
+                              lv_color_hex(active ? 0x0057B8 : 0xFFFFFF), LV_PART_MAIN);
+    const lv_color_t text_color = lv_color_hex(active ? 0xFFFFFF : 0x000000);
+    lv_obj_set_style_text_color(name_labels[i], text_color, LV_PART_MAIN);
+    lv_obj_set_style_text_color(value_labels[i], text_color, LV_PART_MAIN);
+    const std::string text = display_value(i);
+    lv_label_set_text(value_labels[i], text.c_str());
+  }
+}
+
+void set_feedback(const char *text) {
   std::lock_guard<std::recursive_mutex> lock(ui_mutex);
-  if (status_label) {
-    lv_label_set_text(status_label, text);
+  if (feedback_label) lv_label_set_text(feedback_label, text);
+}
+
+void select_field(size_t new_field) {
+  active_field = new_field % FIELD_COUNT;
+  edit_original = values[active_field];
+  edit_original_was_default = pristine_defaults[active_field];
+  cursors[active_field] = std::min(cursors[active_field], values[active_field].size());
+  refresh_rows();
+}
+
+bool character_allowed(size_t field, char value) {
+  if (field == static_cast<size_t>(Field::FREQUENCY)) {
+    return std::isdigit(static_cast<unsigned char>(value)) || value == '.';
+  }
+  if (field == static_cast<size_t>(Field::RST_SENT) ||
+      field == static_cast<size_t>(Field::RST_RECEIVED)) {
+    return std::isdigit(static_cast<unsigned char>(value));
+  }
+  return std::isalnum(static_cast<unsigned char>(value)) || value == '/' || value == '-';
+}
+
+size_t maximum_length(size_t field) {
+  if (field == static_cast<size_t>(Field::CALLSIGN)) return 16;
+  if (field == static_cast<size_t>(Field::FREQUENCY)) return 9;
+  if (field == static_cast<size_t>(Field::RST_SENT) ||
+      field == static_cast<size_t>(Field::RST_RECEIVED)) return 3;
+  return 12;
+}
+
+void insert_character(char value) {
+  if (!character_allowed(active_field, value)) return;
+  if (pristine_defaults[active_field]) {
+    values[active_field].clear();
+    cursors[active_field] = 0;
+    pristine_defaults[active_field] = false;
+  }
+  if (values[active_field].size() >= maximum_length(active_field)) return;
+  if (active_field == static_cast<size_t>(Field::CALLSIGN) ||
+      active_field == static_cast<size_t>(Field::POTA)) {
+    value = static_cast<char>(std::toupper(static_cast<unsigned char>(value)));
+  }
+  values[active_field].insert(cursors[active_field], 1, value);
+  ++cursors[active_field];
+  refresh_rows();
+}
+
+void delete_character() {
+  if (cursors[active_field] == 0 || values[active_field].empty()) return;
+  values[active_field].erase(cursors[active_field] - 1, 1);
+  --cursors[active_field];
+  refresh_rows();
+}
+
+void save_mock_qso() {
+  if (values[static_cast<size_t>(Field::CALLSIGN)].empty()) {
+    set_feedback("Enter a callsign");
+    return;
+  }
+
+  ++mock_qso_count;
+  char message[96];
+  std::snprintf(message, sizeof(message), "#%lu saved: %s  %s %s",
+                static_cast<unsigned long>(mock_qso_count),
+                values[static_cast<size_t>(Field::CALLSIGN)].c_str(),
+                values[static_cast<size_t>(Field::FREQUENCY)].c_str(),
+                band_from_frequency(values[static_cast<size_t>(Field::FREQUENCY)]));
+  set_feedback(message);
+  ESP_LOGI(TAG, "%s", message);
+
+  values[static_cast<size_t>(Field::CALLSIGN)].clear();
+  cursors[static_cast<size_t>(Field::CALLSIGN)] = 0;
+  edit_original.clear();
+  refresh_rows();
+}
+
+void handle_special_key(espp::M5StackCardputer::SpecialKey key) {
+  switch (key) {
+  case espp::M5StackCardputer::SpecialKey::UP:
+    break;
+  case espp::M5StackCardputer::SpecialKey::DOWN:
+    break;
+  case espp::M5StackCardputer::SpecialKey::LEFT:
+    if (cursors[active_field] > 0) --cursors[active_field];
+    refresh_rows();
+    break;
+  case espp::M5StackCardputer::SpecialKey::RIGHT:
+    if (cursors[active_field] < values[active_field].size()) ++cursors[active_field];
+    refresh_rows();
+    break;
+  case espp::M5StackCardputer::SpecialKey::DELETE:
+    if (cursors[active_field] < values[active_field].size()) {
+      values[active_field].erase(cursors[active_field], 1);
+      refresh_rows();
+    }
+    break;
+  case espp::M5StackCardputer::SpecialKey::ESC:
+    values[active_field] = edit_original;
+    pristine_defaults[active_field] = edit_original_was_default;
+    cursors[active_field] = values[active_field].size();
+    set_feedback("Edit cancelled");
+    refresh_rows();
+    break;
+  default:
+    break;
   }
 }
 
 void handle_key(const espp::M5StackCardputer::KeyEvent &event) {
-  if (!event.pressed) {
-    return;
-  }
-
+  if (!event.pressed) return;
   std::lock_guard<std::recursive_mutex> lock(ui_mutex);
 
   if (event.special != espp::M5StackCardputer::SpecialKey::NONE) {
-    switch (event.special) {
-    case espp::M5StackCardputer::SpecialKey::LEFT:
-      lv_textarea_cursor_left(input_area);
-      break;
-    case espp::M5StackCardputer::SpecialKey::RIGHT:
-      lv_textarea_cursor_right(input_area);
-      break;
-    case espp::M5StackCardputer::SpecialKey::UP:
-      lv_textarea_cursor_up(input_area);
-      break;
-    case espp::M5StackCardputer::SpecialKey::DOWN:
-      lv_textarea_cursor_down(input_area);
-      break;
-    case espp::M5StackCardputer::SpecialKey::DELETE:
-      lv_textarea_delete_char_forward(input_area);
-      break;
-    case espp::M5StackCardputer::SpecialKey::ESC:
-      lv_textarea_set_text(input_area, "");
-      break;
-    default:
-      break;
-    }
+    handle_special_key(event.special);
     return;
   }
-
   if (event.value == '\b') {
-    lv_textarea_delete_char(input_area);
+    delete_character();
+  } else if (event.value == '\t') {
+    select_field((active_field + 1) % FIELD_COUNT);
+    set_feedback("TAB field   ENTER accept/save");
+  } else if (event.value == '\n' || event.value == '\r') {
+    if (active_field == static_cast<size_t>(Field::CALLSIGN)) {
+      save_mock_qso();
+    } else {
+      select_field(static_cast<size_t>(Field::CALLSIGN));
+      set_feedback("Setting accepted");
+    }
   } else if (event.value != 0) {
-    lv_textarea_add_char(input_area, event.value);
+    insert_character(event.value);
   }
+}
+
+void create_ui() {
+  std::lock_guard<std::recursive_mutex> lock(ui_mutex);
+  lv_obj_t *screen = lv_screen_active();
+  lv_obj_set_style_bg_color(screen, lv_color_hex(0xDDE4EA), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
+
+  header_label = lv_label_create(screen);
+  lv_label_set_text(header_label, "CW LOGGER  BAT --");
+  lv_obj_set_style_text_color(header_label, lv_color_hex(0x000000), LV_PART_MAIN);
+  lv_obj_align(header_label, LV_ALIGN_TOP_MID, 0, 1);
+
+  for (size_t i = 0; i < FIELD_COUNT; ++i) {
+    rows[i] = lv_obj_create(screen);
+    lv_obj_set_size(rows[i], 236, 18);
+    lv_obj_set_pos(rows[i], 2, 17 + static_cast<int>(i) * 19);
+    lv_obj_set_style_radius(rows[i], 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(rows[i], 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(rows[i], 1, LV_PART_MAIN);
+    lv_obj_remove_flag(rows[i], LV_OBJ_FLAG_SCROLLABLE);
+
+    name_labels[i] = lv_label_create(rows[i]);
+    lv_label_set_text(name_labels[i], FIELD_NAMES[i]);
+    lv_obj_set_width(name_labels[i], 48);
+    lv_obj_align(name_labels[i], LV_ALIGN_LEFT_MID, 1, 0);
+
+    value_labels[i] = lv_label_create(rows[i]);
+    lv_obj_set_width(value_labels[i], 178);
+    lv_label_set_long_mode(value_labels[i], LV_LABEL_LONG_CLIP);
+    lv_obj_align(value_labels[i], LV_ALIGN_RIGHT_MID, -1, 0);
+  }
+
+  lv_obj_t *footer = lv_obj_create(screen);
+  lv_obj_set_size(footer, 240, 23);
+  lv_obj_set_pos(footer, 0, 112);
+  lv_obj_set_style_bg_color(footer, lv_color_hex(0xDDE4EA), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(footer, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(footer, 0, LV_PART_MAIN);
+  lv_obj_set_style_radius(footer, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(footer, 0, LV_PART_MAIN);
+  lv_obj_remove_flag(footer, LV_OBJ_FLAG_SCROLLABLE);
+
+  feedback_label = lv_label_create(footer);
+  lv_obj_set_width(feedback_label, 226);
+  lv_label_set_long_mode(feedback_label, LV_LABEL_LONG_CLIP);
+  lv_obj_set_style_text_color(feedback_label, lv_color_hex(0x000000), LV_PART_MAIN);
+  lv_obj_align(feedback_label, LV_ALIGN_TOP_MID, 0, 1);
+  lv_label_set_text(feedback_label, "TAB field   ENTER accept/save");
+
+  edit_original = values[active_field];
+  edit_original_was_default = pristine_defaults[active_field];
+  refresh_rows();
+}
+
+void update_header(espp::M5StackCardputer &cardputer) {
+  char header[64];
+  std::snprintf(header, sizeof(header), "CW LOGGER   BAT %.2fV %.0f%%",
+                cardputer.battery_voltage(), cardputer.battery_soc());
+  std::lock_guard<std::recursive_mutex> lock(ui_mutex);
+  lv_label_set_text(header_label, header);
 }
 
 } // namespace
 
-extern "C" void app_main(void) {
-  ESP_LOGI(TAG, "Cardputer ADV display + keyboard smoke test starting");
 
+extern "C" void app_main(void) {
+  ESP_LOGI(TAG, "QSO entry usability prototype starting");
   auto &cardputer = espp::M5StackCardputer::get();
   cardputer.set_log_level(espp::Logger::Verbosity::INFO);
 
@@ -133,7 +313,11 @@ extern "C" void app_main(void) {
     ESP_LOGE(TAG, "LCD initialization FAILED");
     return;
   }
-
+  // The 135-pixel-tall visible window starts at row 53 in the ST7789's
+  // 240-pixel GRAM. The BSP currently uses 52, leaving the physical bottom
+  // row untouched and showing stale/random pixels.
+  cardputer.display_driver()->set_offset(40, 53);
+  ESP_LOGI(TAG, "Applied Cardputer ST7789 display offset correction: 40,53");
   constexpr size_t pixel_buffer_size = espp::M5StackCardputer::lcd_width() * 40;
   if (!cardputer.initialize_display(pixel_buffer_size)) {
     ESP_LOGE(TAG, "LVGL display initialization FAILED");
@@ -146,20 +330,15 @@ extern "C" void app_main(void) {
 
   if (!cardputer.initialize_keyboard(handle_key)) {
     ESP_LOGE(TAG, "Keyboard initialization FAILED");
-    set_status("KEYBOARD INIT FAILED");
+    set_feedback("KEYBOARD INIT FAILED");
     return;
   }
 
   ESP_LOGI(TAG, "Detected board: %s",
            espp::M5StackCardputer::variant_name(cardputer.variant()));
-
-  char status[96];
   while (true) {
     cardputer.brightness(100.0f);
-    std::snprintf(status, sizeof(status), "%s  BAT %.2f V  %.0f%%",
-                  espp::M5StackCardputer::variant_name(cardputer.variant()),
-                  cardputer.battery_voltage(), cardputer.battery_soc());
-    set_status(status);
+    update_header(cardputer);
     vTaskDelay(pdMS_TO_TICKS(2000));
   }
 }
