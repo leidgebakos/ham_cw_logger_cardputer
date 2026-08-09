@@ -24,12 +24,13 @@ std::string_view band_from_frequency(std::string_view frequency_mhz) {
   return "?";
 }
 
-std::optional<QsoRecord> make_qso_record(const QsoDraft &draft) {
+std::optional<QsoRecord> make_qso_record(const QsoDraft &draft, std::time_t timestamp_utc) {
   if (draft.callsign.empty() || draft.frequency_mhz.empty() ||
-      band_from_frequency(draft.frequency_mhz) == "?") {
+      band_from_frequency(draft.frequency_mhz) == "?" || timestamp_utc <= 0) {
     return std::nullopt;
   }
   return QsoRecord{
+      .timestamp_utc = timestamp_utc,
       .callsign = draft.callsign,
       .frequency_mhz = draft.frequency_mhz,
       .band = std::string(band_from_frequency(draft.frequency_mhz)),

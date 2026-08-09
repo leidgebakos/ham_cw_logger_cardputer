@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstdio>
+#include <ctime>
 #include <mutex>
 #include <string>
 
@@ -12,6 +13,7 @@
 #include "freertos/task.h"
 #include "lvgl.h"
 #include "m5stack-cardputer.hpp"
+#include "adif_log.hpp"
 #include "app_settings.hpp"
 #include "network_time.hpp"
 #include "qso_model.hpp"
@@ -49,8 +51,9 @@ lv_obj_t *feedback_label = nullptr;
 size_t active_field = 0;
 std::string edit_original;
 bool edit_original_was_default = false;
-uint32_t mock_qso_count = 0;
+uint32_t qso_count = 0;
 
+ham::logger::AdifLog adif_log;
 ham::logger::SettingsStore settings_store;
 ham::logger::AppSettings app_settings;
 ham::logger::AppSettings settings_snapshot;
@@ -288,7 +291,7 @@ void delete_character() {
   refresh_rows();
 }
 
-void save_mock_qso() {
+void save_qso() {
   const ham::logger::QsoDraft draft{
       .callsign = values[static_cast<size_t>(Field::CALLSIGN)],
       .frequency_mhz = values[static_cast<size_t>(Field::FREQUENCY)],
@@ -296,16 +299,34 @@ void save_mock_qso() {
       .rst_received = values[static_cast<size_t>(Field::RST_RECEIVED)],
       .pota_reference = values[static_cast<size_t>(Field::POTA)],
   };
-  const auto record = ham::logger::make_qso_record(draft);
-  if (!record) {
-    set_feedback(draft.callsign.empty() ? "Enter a callsign" : "Invalid frequency");
+  if (draft.callsign.empty()) {
+    set_feedback("Enter a callsign");
+    return;
+  }
+  if (band_from_frequency(draft.frequency_mhz) == "?") {
+    set_feedback("Invalid frequency");
+    return;
+  }
+  if (!adif_log.ready()) {
+    set_feedback("SD NOT READY - QSO NOT SAVED");
     return;
   }
 
-  ++mock_qso_count;
+  std::tm utc{};
+  if (!network_time.utc_now(utc)) {
+    set_feedback("UTC NOT SYNCED - QSO NOT SAVED");
+    return;
+  }
+  const auto record = ham::logger::make_qso_record(draft, std::time(nullptr));
+  if (!record || !adif_log.append(*record)) {
+    set_feedback("SD WRITE FAILED - QSO KEPT");
+    return;
+  }
+
+  ++qso_count;
   char message[96];
   std::snprintf(message, sizeof(message), "#%lu saved: %s  %s %s",
-                static_cast<unsigned long>(mock_qso_count),
+                static_cast<unsigned long>(qso_count),
                 record->callsign.c_str(), record->frequency_mhz.c_str(),
                 record->band.c_str());
   set_feedback(message);
@@ -374,7 +395,7 @@ void handle_key(const espp::M5StackCardputer::KeyEvent &event) {
     set_feedback("TAB field   ENTER accept/save");
   } else if (event.value == '\n' || event.value == '\r') {
     if (active_field == static_cast<size_t>(Field::CALLSIGN)) {
-      save_mock_qso();
+      save_qso();
     } else {
       select_field(static_cast<size_t>(Field::CALLSIGN));
       set_feedback("Setting accepted");
@@ -507,7 +528,9 @@ void update_header(espp::M5StackCardputer &cardputer) {
     network_text = "W!";
     break;
   }
-  std::snprintf(header, sizeof(header), "CW %s %s  %.2fV %.0f%%", utc_text, network_text,
+  const char *sd_text = adif_log.ready() ? "S+" : "S!";
+  std::snprintf(header, sizeof(header), "CW %s %s%s %.2fV %.0f%%", utc_text, network_text,
+                sd_text,
                 cardputer.battery_voltage(), cardputer.battery_soc());
   std::lock_guard<std::recursive_mutex> lock(ui_mutex);
   lv_label_set_text(header_label, header);
@@ -548,6 +571,13 @@ extern "C" void app_main(void) {
     ESP_LOGE(TAG, "Keyboard initialization FAILED");
     set_feedback("KEYBOARD INIT FAILED");
     return;
+  }
+
+  if (!cardputer.initialize_sdcard({}) || !adif_log.initialize("/sdcard/cw_log.adi")) {
+    ESP_LOGE(TAG, "SD/ADIF initialization failed; QSOs cannot be saved");
+    set_feedback("SD not ready - insert card and reboot");
+  } else {
+    set_feedback("SD ready: /cw_log.adi");
   }
 
   if (!network_time.initialize() || !network_time.configure(app_settings)) {

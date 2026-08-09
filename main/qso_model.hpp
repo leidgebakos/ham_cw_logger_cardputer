@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ctime>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -15,6 +16,7 @@ struct QsoDraft {
 };
 
 struct QsoRecord {
+  std::time_t timestamp_utc;
   std::string callsign;
   std::string frequency_mhz;
   std::string band;
@@ -24,6 +26,6 @@ struct QsoRecord {
 };
 
 std::string_view band_from_frequency(std::string_view frequency_mhz);
-std::optional<QsoRecord> make_qso_record(const QsoDraft &draft);
+std::optional<QsoRecord> make_qso_record(const QsoDraft &draft, std::time_t timestamp_utc);
 
 } // namespace ham::logger
