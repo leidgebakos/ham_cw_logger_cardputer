@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <ctime>
+#include <string>
 
 #include "app_settings.hpp"
 #include "esp_event_base.h"
@@ -28,6 +29,7 @@ public:
   bool configure(const AppSettings &settings);
   NetworkTimeStatus status() const;
   bool utc_now(std::tm &utc) const;
+  std::string ipv4_address() const;
 
 private:
   static void event_handler(void *argument, esp_event_base_t event_base,
@@ -38,6 +40,7 @@ private:
   std::atomic<bool> enabled_{false};
   std::atomic<bool> connected_{false};
   std::atomic<unsigned> retry_count_{0};
+  std::atomic<uint32_t> ipv4_address_{0};
   bool initialized_{false};
   bool wifi_started_{false};
 };

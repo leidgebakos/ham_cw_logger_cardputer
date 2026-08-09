@@ -1,6 +1,7 @@
 #include "network_time.hpp"
 
 #include <cstring>
+#include <cstdio>
 
 #include "esp_err.h"
 #include "esp_event.h"
@@ -67,6 +68,7 @@ bool NetworkTimeService::configure(const AppSettings &settings) {
 
   enabled_.store(false);
   connected_.store(false);
+  ipv4_address_.store(0);
   retry_count_.store(0);
   if (wifi_started_) {
     const esp_err_t error = esp_wifi_disconnect();
@@ -133,6 +135,18 @@ bool NetworkTimeService::utc_now(std::tm &utc) const {
   return utc.tm_year + 1900 >= MINIMUM_VALID_YEAR;
 }
 
+std::string NetworkTimeService::ipv4_address() const {
+  const uint32_t address = ipv4_address_.load();
+  if (address == 0) return {};
+  char text[16]{};
+  std::snprintf(text, sizeof(text), "%u.%u.%u.%u",
+                static_cast<unsigned>(address & 0xff),
+                static_cast<unsigned>((address >> 8) & 0xff),
+                static_cast<unsigned>((address >> 16) & 0xff),
+                static_cast<unsigned>((address >> 24) & 0xff));
+  return text;
+}
+
 void NetworkTimeService::event_handler(void *argument, esp_event_base_t event_base,
                                        int32_t event_id, void *event_data) {
   static_cast<NetworkTimeService *>(argument)->handle_event(event_base, event_id, event_data);
@@ -149,6 +163,7 @@ void NetworkTimeService::handle_event(esp_event_base_t event_base, int32_t event
 
   if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
     connected_.store(false);
+    ipv4_address_.store(0);
     if (!enabled_.load()) return;
 
     const unsigned retry = retry_count_.fetch_add(1) + 1;
@@ -166,6 +181,7 @@ void NetworkTimeService::handle_event(esp_event_base_t event_base, int32_t event
   if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
     const auto *event = static_cast<const ip_event_got_ip_t *>(event_data);
     connected_.store(true);
+    ipv4_address_.store(event->ip_info.ip.addr);
     retry_count_.store(0);
     state_.store(NetworkState::ONLINE);
     ESP_LOGI(TAG, "WiFi connected, IP: " IPSTR, IP2STR(&event->ip_info.ip));

@@ -15,6 +15,7 @@
 #include "m5stack-cardputer.hpp"
 #include "adif_log.hpp"
 #include "app_settings.hpp"
+#include "log_web_server.hpp"
 #include "network_time.hpp"
 #include "qso_model.hpp"
 #include "task.hpp"
@@ -54,6 +55,7 @@ bool edit_original_was_default = false;
 uint32_t qso_count = 0;
 
 ham::logger::AdifLog adif_log;
+ham::logger::LogWebServer log_web_server;
 ham::logger::SettingsStore settings_store;
 ham::logger::AppSettings app_settings;
 ham::logger::AppSettings settings_snapshot;
@@ -153,6 +155,16 @@ void select_settings_field(size_t index) {
   refresh_settings_rows();
 }
 
+void update_settings_footer() {
+  const std::string address = network_time.ipv4_address();
+  if (log_web_server.running() && !address.empty()) {
+    const std::string text = "WEB " + address;
+    lv_label_set_text(settings_feedback_label, text.c_str());
+  } else {
+    lv_label_set_text(settings_feedback_label, "TAB field  ENTER save  ESC back");
+  }
+}
+
 void open_settings() {
   settings_snapshot = app_settings;
   settings_cursors[0] = app_settings.wifi_ssid.size();
@@ -161,7 +173,7 @@ void open_settings() {
   select_settings_field(0);
   lv_obj_remove_flag(settings_root, LV_OBJ_FLAG_HIDDEN);
   lv_obj_move_foreground(settings_root);
-  lv_label_set_text(settings_feedback_label, "TAB field  ENTER save  ESC back");
+  update_settings_footer();
 }
 
 void close_settings(bool save) {
@@ -179,7 +191,7 @@ void close_settings(bool save) {
 
 void refresh_settings_value() {
   refresh_settings_rows();
-  lv_label_set_text(settings_feedback_label, "TAB field  ENTER save  ESC back");
+  update_settings_footer();
 }
 
 void handle_settings_key(const espp::M5StackCardputer::KeyEvent &event) {
@@ -602,6 +614,15 @@ extern "C" void app_main(void) {
       }
       if (!network_time.configure(updated_settings)) {
         set_feedback("WiFi reconnect failed - offline mode");
+      }
+    }
+    const auto network_status = network_time.status();
+    if (network_status.wifi_connected && !log_web_server.running() &&
+        log_web_server.start(adif_log)) {
+      const std::string address = network_time.ipv4_address();
+      if (!address.empty()) {
+        const std::string message = "WEB http://" + address;
+        set_feedback(message.c_str());
       }
     }
     cardputer.brightness(100.0f);

@@ -42,6 +42,7 @@ bool sync_and_close(FILE *file, bool written) {
 } // namespace
 
 bool AdifLog::initialize(std::string file_path) {
+  std::lock_guard<std::mutex> lock(file_mutex_);
   ready_.store(false);
   file_path_ = std::move(file_path);
   if (file_path_.empty() || !write_header_if_needed()) return false;
@@ -78,6 +79,7 @@ bool AdifLog::write_header_if_needed() {
 }
 
 bool AdifLog::append(const QsoRecord &record) {
+  std::lock_guard<std::mutex> lock(file_mutex_);
   if (!ready_.load()) return false;
 
   std::tm utc{};
@@ -125,6 +127,30 @@ bool AdifLog::append(const QsoRecord &record) {
 
   ESP_LOGI(TAG, "QSO appended: %s %s %sZ", record.callsign.c_str(), date, time);
   return true;
+}
+
+bool AdifLog::stream(const std::function<bool(const char *, size_t)> &consumer) {
+  std::lock_guard<std::mutex> lock(file_mutex_);
+  if (!ready_.load() || !consumer) return false;
+
+  FILE *file = std::fopen(file_path_.c_str(), "rb");
+  if (!file) {
+    ESP_LOGE(TAG, "Could not open ADIF log for download: errno=%d", errno);
+    return false;
+  }
+
+  bool ok = true;
+  char buffer[1024];
+  while (ok) {
+    const size_t count = std::fread(buffer, 1, sizeof(buffer), file);
+    if (count > 0 && !consumer(buffer, count)) ok = false;
+    if (count < sizeof(buffer)) {
+      if (std::ferror(file)) ok = false;
+      break;
+    }
+  }
+  if (std::fclose(file) != 0) ok = false;
+  return ok;
 }
 
 } // namespace ham::logger
