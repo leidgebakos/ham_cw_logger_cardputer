@@ -11,6 +11,7 @@
 #include "freertos/task.h"
 #include "lvgl.h"
 #include "m5stack-cardputer.hpp"
+#include "app_settings.hpp"
 #include "qso_model.hpp"
 #include "task.hpp"
 
@@ -47,6 +48,19 @@ size_t active_field = 0;
 std::string edit_original;
 bool edit_original_was_default = false;
 uint32_t mock_qso_count = 0;
+
+ham::logger::SettingsStore settings_store;
+ham::logger::AppSettings app_settings;
+ham::logger::AppSettings settings_snapshot;
+bool settings_store_ready = false;
+bool settings_open = false;
+lv_obj_t *settings_root = nullptr;
+lv_obj_t *settings_feedback_label = nullptr;
+std::array<lv_obj_t *, 3> settings_rows{};
+std::array<lv_obj_t *, 3> settings_name_labels{};
+std::array<lv_obj_t *, 3> settings_value_labels{};
+std::array<size_t, 2> settings_cursors{};
+size_t settings_active = 0;
 
 espp::Task ui_task({
     .callback =
@@ -91,6 +105,131 @@ void refresh_rows() {
 void set_feedback(const char *text) {
   std::lock_guard<std::recursive_mutex> lock(ui_mutex);
   if (feedback_label) lv_label_set_text(feedback_label, text);
+}
+
+std::string &settings_value(size_t index) {
+  return index == 0 ? app_settings.wifi_ssid : app_settings.wifi_password;
+}
+
+std::string settings_display_value(size_t index) {
+  if (index == 2) return "[ ENTER TO SAVE ]";
+
+  const std::string &value = settings_value(index);
+  std::string text = index == 1 ? std::string(value.size(), '*') : value;
+  if (text.empty()) text = "-";
+  if (index == settings_active) {
+    const size_t cursor = value.empty() ? 0 : std::min(settings_cursors[index], text.size());
+    text.insert(cursor, "|");
+  }
+  return text;
+}
+
+void refresh_settings_rows() {
+  for (size_t i = 0; i < settings_rows.size(); ++i) {
+    const bool active = i == settings_active;
+    lv_obj_set_style_bg_color(settings_rows[i],
+                              lv_color_hex(active ? 0x0057B8 : 0xFFFFFF), LV_PART_MAIN);
+    const lv_color_t text_color = lv_color_hex(active ? 0xFFFFFF : 0x000000);
+    lv_obj_set_style_text_color(settings_name_labels[i], text_color, LV_PART_MAIN);
+    lv_obj_set_style_text_color(settings_value_labels[i], text_color, LV_PART_MAIN);
+    const std::string text = settings_display_value(i);
+    lv_label_set_text(settings_value_labels[i], text.c_str());
+  }
+}
+
+void select_settings_field(size_t index) {
+  settings_active = index % settings_rows.size();
+  if (settings_active < settings_cursors.size()) {
+    settings_cursors[settings_active] =
+        std::min(settings_cursors[settings_active], settings_value(settings_active).size());
+  }
+  refresh_settings_rows();
+}
+
+void open_settings() {
+  settings_snapshot = app_settings;
+  settings_cursors[0] = app_settings.wifi_ssid.size();
+  settings_cursors[1] = app_settings.wifi_password.size();
+  settings_open = true;
+  select_settings_field(0);
+  lv_obj_remove_flag(settings_root, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(settings_root);
+  lv_label_set_text(settings_feedback_label, "TAB field  ENTER save  ESC back");
+}
+
+void close_settings(bool save) {
+  if (save) {
+    const bool ok = settings_store_ready && settings_store.save(app_settings);
+    set_feedback(ok ? "WiFi settings saved" : "SETTINGS SAVE FAILED");
+  } else {
+    app_settings = settings_snapshot;
+    set_feedback("Settings cancelled");
+  }
+  settings_open = false;
+  lv_obj_add_flag(settings_root, LV_OBJ_FLAG_HIDDEN);
+}
+
+void refresh_settings_value() {
+  refresh_settings_rows();
+  lv_label_set_text(settings_feedback_label, "TAB field  ENTER save  ESC back");
+}
+
+void handle_settings_key(const espp::M5StackCardputer::KeyEvent &event) {
+  if (event.special != espp::M5StackCardputer::SpecialKey::NONE) {
+    switch (event.special) {
+    case espp::M5StackCardputer::SpecialKey::LEFT:
+      if (settings_active < 2 && settings_cursors[settings_active] > 0) {
+        --settings_cursors[settings_active];
+        refresh_settings_value();
+      }
+      break;
+    case espp::M5StackCardputer::SpecialKey::RIGHT:
+      if (settings_active < 2 &&
+          settings_cursors[settings_active] < settings_value(settings_active).size()) {
+        ++settings_cursors[settings_active];
+        refresh_settings_value();
+      }
+      break;
+    case espp::M5StackCardputer::SpecialKey::DELETE:
+      if (settings_active < 2 &&
+          settings_cursors[settings_active] < settings_value(settings_active).size()) {
+        settings_value(settings_active).erase(settings_cursors[settings_active], 1);
+        refresh_settings_value();
+      }
+      break;
+    case espp::M5StackCardputer::SpecialKey::ESC:
+      close_settings(false);
+      break;
+    default:
+      break;
+    }
+    return;
+  }
+
+  if (event.value == '\t') {
+    select_settings_field((settings_active + 1) % settings_rows.size());
+  } else if (event.value == '\n' || event.value == '\r') {
+    if (settings_active == 2) {
+      close_settings(true);
+    } else {
+      select_settings_field(settings_active + 1);
+    }
+  } else if (event.value == '\b' && settings_active < 2) {
+    std::string &value = settings_value(settings_active);
+    if (settings_cursors[settings_active] > 0 && !value.empty()) {
+      value.erase(settings_cursors[settings_active] - 1, 1);
+      --settings_cursors[settings_active];
+      refresh_settings_value();
+    }
+  } else if (settings_active < 2 && event.value >= 32 && event.value <= 126) {
+    std::string &value = settings_value(settings_active);
+    const size_t maximum = settings_active == 0 ? 32 : 63;
+    if (value.size() < maximum) {
+      value.insert(settings_cursors[settings_active], 1, event.value);
+      ++settings_cursors[settings_active];
+      refresh_settings_value();
+    }
+  }
 }
 
 void select_field(size_t new_field) {
@@ -194,6 +333,11 @@ void handle_special_key(espp::M5StackCardputer::SpecialKey key) {
     }
     break;
   case espp::M5StackCardputer::SpecialKey::ESC:
+    if (active_field == static_cast<size_t>(Field::CALLSIGN) &&
+        values[active_field].empty()) {
+      open_settings();
+      break;
+    }
     values[active_field] = edit_original;
     pristine_defaults[active_field] = edit_original_was_default;
     cursors[active_field] = values[active_field].size();
@@ -208,6 +352,11 @@ void handle_special_key(espp::M5StackCardputer::SpecialKey key) {
 void handle_key(const espp::M5StackCardputer::KeyEvent &event) {
   if (!event.pressed) return;
   std::lock_guard<std::recursive_mutex> lock(ui_mutex);
+
+  if (settings_open) {
+    handle_settings_key(event);
+    return;
+  }
 
   if (event.special != espp::M5StackCardputer::SpecialKey::NONE) {
     handle_special_key(event.special);
@@ -278,6 +427,51 @@ void create_ui() {
   lv_obj_align(feedback_label, LV_ALIGN_TOP_MID, 0, 1);
   lv_label_set_text(feedback_label, "TAB field   ENTER accept/save");
 
+  settings_root = lv_obj_create(screen);
+  lv_obj_set_size(settings_root, 240, 135);
+  lv_obj_set_pos(settings_root, 0, 0);
+  lv_obj_set_style_bg_color(settings_root, lv_color_hex(0xDDE4EA), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(settings_root, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(settings_root, 0, LV_PART_MAIN);
+  lv_obj_set_style_radius(settings_root, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(settings_root, 0, LV_PART_MAIN);
+  lv_obj_remove_flag(settings_root, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *settings_title = lv_label_create(settings_root);
+  lv_label_set_text(settings_title, "SETTINGS - WIFI");
+  lv_obj_set_style_text_color(settings_title, lv_color_hex(0x000000), LV_PART_MAIN);
+  lv_obj_align(settings_title, LV_ALIGN_TOP_MID, 0, 4);
+
+  constexpr std::array<const char *, 3> SETTINGS_NAMES = {"SSID", "PASS", "SAVE"};
+  for (size_t i = 0; i < settings_rows.size(); ++i) {
+    settings_rows[i] = lv_obj_create(settings_root);
+    lv_obj_set_size(settings_rows[i], 228, 20);
+    lv_obj_set_pos(settings_rows[i], 6, 26 + static_cast<int>(i) * 24);
+    lv_obj_set_style_radius(settings_rows[i], 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(settings_rows[i], 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(settings_rows[i], 1, LV_PART_MAIN);
+    lv_obj_remove_flag(settings_rows[i], LV_OBJ_FLAG_SCROLLABLE);
+
+    settings_name_labels[i] = lv_label_create(settings_rows[i]);
+    lv_label_set_text(settings_name_labels[i], SETTINGS_NAMES[i]);
+    lv_obj_set_width(settings_name_labels[i], 48);
+    lv_obj_align(settings_name_labels[i], LV_ALIGN_LEFT_MID, 1, 0);
+
+    settings_value_labels[i] = lv_label_create(settings_rows[i]);
+    lv_obj_set_width(settings_value_labels[i], 168);
+    lv_label_set_long_mode(settings_value_labels[i], LV_LABEL_LONG_CLIP);
+    lv_obj_align(settings_value_labels[i], LV_ALIGN_RIGHT_MID, -1, 0);
+  }
+
+  settings_feedback_label = lv_label_create(settings_root);
+  lv_obj_set_width(settings_feedback_label, 228);
+  lv_label_set_long_mode(settings_feedback_label, LV_LABEL_LONG_CLIP);
+  lv_obj_set_style_text_color(settings_feedback_label, lv_color_hex(0x000000), LV_PART_MAIN);
+  lv_obj_align(settings_feedback_label, LV_ALIGN_BOTTOM_MID, 0, -5);
+  lv_label_set_text(settings_feedback_label, "TAB field  ENTER save  ESC back");
+  refresh_settings_rows();
+  lv_obj_add_flag(settings_root, LV_OBJ_FLAG_HIDDEN);
+
   edit_original = values[active_field];
   edit_original_was_default = pristine_defaults[active_field];
   refresh_rows();
@@ -296,6 +490,10 @@ void update_header(espp::M5StackCardputer &cardputer) {
 
 extern "C" void app_main(void) {
   ESP_LOGI(TAG, "QSO entry usability prototype starting");
+  settings_store_ready = settings_store.initialize();
+  if (settings_store_ready && !settings_store.load(app_settings)) {
+    ESP_LOGW(TAG, "Could not load saved settings; using empty WiFi credentials");
+  }
   auto &cardputer = espp::M5StackCardputer::get();
   cardputer.set_log_level(espp::Logger::Verbosity::INFO);
 
