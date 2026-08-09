@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cstdio>
@@ -12,6 +13,7 @@
 #include "lvgl.h"
 #include "m5stack-cardputer.hpp"
 #include "app_settings.hpp"
+#include "network_time.hpp"
 #include "qso_model.hpp"
 #include "task.hpp"
 
@@ -52,6 +54,8 @@ uint32_t mock_qso_count = 0;
 ham::logger::SettingsStore settings_store;
 ham::logger::AppSettings app_settings;
 ham::logger::AppSettings settings_snapshot;
+ham::logger::NetworkTimeService network_time;
+std::atomic<bool> network_reconfigure_requested{false};
 bool settings_store_ready = false;
 bool settings_open = false;
 lv_obj_t *settings_root = nullptr;
@@ -160,6 +164,7 @@ void open_settings() {
 void close_settings(bool save) {
   if (save) {
     const bool ok = settings_store_ready && settings_store.save(app_settings);
+    if (ok) network_reconfigure_requested.store(true);
     set_feedback(ok ? "WiFi settings saved" : "SETTINGS SAVE FAILED");
   } else {
     app_settings = settings_snapshot;
@@ -479,7 +484,30 @@ void create_ui() {
 
 void update_header(espp::M5StackCardputer &cardputer) {
   char header[64];
-  std::snprintf(header, sizeof(header), "CW LOGGER   BAT %.2fV %.0f%%",
+  const auto status = network_time.status();
+  char utc_text[8] = "--:--Z";
+  std::tm utc{};
+  if (network_time.utc_now(utc)) {
+    std::strftime(utc_text, sizeof(utc_text), "%H:%MZ", &utc);
+  }
+
+  const char *network_text = "W-";
+  switch (status.network_state) {
+  case ham::logger::NetworkState::DISABLED:
+    network_text = "W-";
+    break;
+  case ham::logger::NetworkState::CONNECTING:
+    network_text = "W~";
+    break;
+  case ham::logger::NetworkState::ONLINE:
+  case ham::logger::NetworkState::SYNCING:
+    network_text = status.utc_valid ? "W+" : "NT";
+    break;
+  case ham::logger::NetworkState::FAILED:
+    network_text = "W!";
+    break;
+  }
+  std::snprintf(header, sizeof(header), "CW %s %s  %.2fV %.0f%%", utc_text, network_text,
                 cardputer.battery_voltage(), cardputer.battery_soc());
   std::lock_guard<std::recursive_mutex> lock(ui_mutex);
   lv_label_set_text(header_label, header);
@@ -522,11 +550,26 @@ extern "C" void app_main(void) {
     return;
   }
 
+  if (!network_time.initialize() || !network_time.configure(app_settings)) {
+    ESP_LOGE(TAG, "Network/time service initialization failed; logger remains usable offline");
+    set_feedback("WiFi/NTP init failed - offline mode");
+  }
+
   ESP_LOGI(TAG, "Detected board: %s",
            espp::M5StackCardputer::variant_name(cardputer.variant()));
   while (true) {
+    if (network_reconfigure_requested.exchange(false)) {
+      ham::logger::AppSettings updated_settings;
+      {
+        std::lock_guard<std::recursive_mutex> lock(ui_mutex);
+        updated_settings = app_settings;
+      }
+      if (!network_time.configure(updated_settings)) {
+        set_feedback("WiFi reconnect failed - offline mode");
+      }
+    }
     cardputer.brightness(100.0f);
     update_header(cardputer);
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
