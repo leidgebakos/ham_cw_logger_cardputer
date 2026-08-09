@@ -3,7 +3,6 @@
 #include <chrono>
 #include <cctype>
 #include <cstdio>
-#include <cstdlib>
 #include <mutex>
 #include <string>
 
@@ -12,9 +11,11 @@
 #include "freertos/task.h"
 #include "lvgl.h"
 #include "m5stack-cardputer.hpp"
+#include "qso_model.hpp"
 #include "task.hpp"
 
 using namespace std::chrono_literals;
+using ham::logger::band_from_frequency;
 
 namespace {
 
@@ -61,24 +62,6 @@ espp::Task ui_task({
     .task_config = {.name = "qso_ui", .stack_size_bytes = 6 * 1024},
 });
 
-const char *band_from_frequency(const std::string &frequency) {
-  char *end = nullptr;
-  const double mhz = std::strtod(frequency.c_str(), &end);
-  if (end == frequency.c_str() || *end != '\0') return "?";
-  if (mhz >= 1.8 && mhz <= 2.0) return "160m";
-  if (mhz >= 3.5 && mhz <= 4.0) return "80m";
-  if (mhz >= 5.25 && mhz <= 5.45) return "60m";
-  if (mhz >= 7.0 && mhz <= 7.3) return "40m";
-  if (mhz >= 10.1 && mhz <= 10.15) return "30m";
-  if (mhz >= 14.0 && mhz <= 14.35) return "20m";
-  if (mhz >= 18.068 && mhz <= 18.168) return "17m";
-  if (mhz >= 21.0 && mhz <= 21.45) return "15m";
-  if (mhz >= 24.89 && mhz <= 24.99) return "12m";
-  if (mhz >= 28.0 && mhz <= 29.7) return "10m";
-  if (mhz >= 50.0 && mhz <= 54.0) return "6m";
-  return "?";
-}
-
 std::string display_value(size_t index) {
   std::string text = values[index].empty() ? "-" : values[index];
   if (index == active_field) {
@@ -87,7 +70,7 @@ std::string display_value(size_t index) {
   }
   if (index == static_cast<size_t>(Field::FREQUENCY)) {
     text += " MHz  ";
-    text += band_from_frequency(values[index]);
+    text += std::string(band_from_frequency(values[index]));
   }
   return text;
 }
@@ -162,8 +145,16 @@ void delete_character() {
 }
 
 void save_mock_qso() {
-  if (values[static_cast<size_t>(Field::CALLSIGN)].empty()) {
-    set_feedback("Enter a callsign");
+  const ham::logger::QsoDraft draft{
+      .callsign = values[static_cast<size_t>(Field::CALLSIGN)],
+      .frequency_mhz = values[static_cast<size_t>(Field::FREQUENCY)],
+      .rst_sent = values[static_cast<size_t>(Field::RST_SENT)],
+      .rst_received = values[static_cast<size_t>(Field::RST_RECEIVED)],
+      .pota_reference = values[static_cast<size_t>(Field::POTA)],
+  };
+  const auto record = ham::logger::make_qso_record(draft);
+  if (!record) {
+    set_feedback(draft.callsign.empty() ? "Enter a callsign" : "Invalid frequency");
     return;
   }
 
@@ -171,9 +162,8 @@ void save_mock_qso() {
   char message[96];
   std::snprintf(message, sizeof(message), "#%lu saved: %s  %s %s",
                 static_cast<unsigned long>(mock_qso_count),
-                values[static_cast<size_t>(Field::CALLSIGN)].c_str(),
-                values[static_cast<size_t>(Field::FREQUENCY)].c_str(),
-                band_from_frequency(values[static_cast<size_t>(Field::FREQUENCY)]));
+                record->callsign.c_str(), record->frequency_mhz.c_str(),
+                record->band.c_str());
   set_feedback(message);
   ESP_LOGI(TAG, "%s", message);
 
