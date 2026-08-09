@@ -334,8 +334,11 @@ void save_qso() {
 
   values[static_cast<size_t>(Field::CALLSIGN)].clear();
   cursors[static_cast<size_t>(Field::CALLSIGN)] = 0;
-  edit_original.clear();
-  refresh_rows();
+  pristine_defaults[static_cast<size_t>(Field::CALLSIGN)] = false;
+  for (size_t index = static_cast<size_t>(Field::FREQUENCY); index < FIELD_COUNT; ++index) {
+    pristine_defaults[index] = !values[index].empty();
+  }
+  select_field(static_cast<size_t>(Field::CALLSIGN));
 }
 
 void handle_special_key(espp::M5StackCardputer::SpecialKey key) {
@@ -394,11 +397,14 @@ void handle_key(const espp::M5StackCardputer::KeyEvent &event) {
     select_field((active_field + 1) % FIELD_COUNT);
     set_feedback("TAB field   ENTER accept/save");
   } else if (event.value == '\n' || event.value == '\r') {
-    if (active_field == static_cast<size_t>(Field::CALLSIGN)) {
+    const bool qso_in_progress =
+        !values[static_cast<size_t>(Field::CALLSIGN)].empty();
+    if (active_field == static_cast<size_t>(Field::CALLSIGN) || qso_in_progress) {
       save_qso();
     } else {
+      pristine_defaults[active_field] = !values[active_field].empty();
       select_field(static_cast<size_t>(Field::CALLSIGN));
-      set_feedback("Setting accepted");
+      set_feedback("Default updated");
     }
   } else if (event.value != 0) {
     insert_character(event.value);
