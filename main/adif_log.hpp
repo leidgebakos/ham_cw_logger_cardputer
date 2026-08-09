@@ -13,11 +13,13 @@ class AdifLog {
 public:
   bool initialize(std::string file_path);
   bool append(const QsoRecord &record);
+  bool clear();
   bool stream(const std::function<bool(const char *, size_t)> &consumer);
   bool ready() const { return ready_.load(); }
   const std::string &file_path() const { return file_path_; }
 
 private:
+  bool write_header();
   bool write_header_if_needed();
 
   std::string file_path_;

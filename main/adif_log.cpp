@@ -67,6 +67,10 @@ bool AdifLog::write_header_if_needed() {
     return false;
   }
 
+  return write_header();
+}
+
+bool AdifLog::write_header() {
   FILE *file = std::fopen(file_path_.c_str(), "wb");
   if (!file) {
     ESP_LOGE(TAG, "Could not create %s: errno=%d", file_path_.c_str(), errno);
@@ -75,6 +79,16 @@ bool AdifLog::write_header_if_needed() {
   const bool written = std::fwrite(HEADER.data(), 1, HEADER.size(), file) == HEADER.size();
   const bool ok = sync_and_close(file, written);
   if (!ok) ESP_LOGE(TAG, "Could not write ADIF header to %s", file_path_.c_str());
+  return ok;
+}
+
+bool AdifLog::clear() {
+  std::lock_guard<std::mutex> lock(file_mutex_);
+  if (file_path_.empty()) return false;
+  ready_.store(false);
+  const bool ok = write_header();
+  ready_.store(ok);
+  if (ok) ESP_LOGW(TAG, "ADIF log cleared: %s", file_path_.c_str());
   return ok;
 }
 

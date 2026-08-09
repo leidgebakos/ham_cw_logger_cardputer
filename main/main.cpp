@@ -65,11 +65,12 @@ bool settings_store_ready = false;
 bool settings_open = false;
 lv_obj_t *settings_root = nullptr;
 lv_obj_t *settings_feedback_label = nullptr;
-std::array<lv_obj_t *, 3> settings_rows{};
-std::array<lv_obj_t *, 3> settings_name_labels{};
-std::array<lv_obj_t *, 3> settings_value_labels{};
+std::array<lv_obj_t *, 4> settings_rows{};
+std::array<lv_obj_t *, 4> settings_name_labels{};
+std::array<lv_obj_t *, 4> settings_value_labels{};
 std::array<size_t, 2> settings_cursors{};
 size_t settings_active = 0;
+bool clear_log_confirmation = false;
 
 espp::Task ui_task({
     .callback =
@@ -122,6 +123,9 @@ std::string &settings_value(size_t index) {
 
 std::string settings_display_value(size_t index) {
   if (index == 2) return "[ ENTER TO SAVE ]";
+  if (index == 3) {
+    return clear_log_confirmation ? "[ ENTER AGAIN ]" : "[ CLEAR QSO LOG ]";
+  }
 
   const std::string &value = settings_value(index);
   std::string text = index == 1 ? std::string(value.size(), '*') : value;
@@ -147,6 +151,7 @@ void refresh_settings_rows() {
 }
 
 void select_settings_field(size_t index) {
+  clear_log_confirmation = false;
   settings_active = index % settings_rows.size();
   if (settings_active < settings_cursors.size()) {
     settings_cursors[settings_active] =
@@ -169,6 +174,7 @@ void open_settings() {
   settings_snapshot = app_settings;
   settings_cursors[0] = app_settings.wifi_ssid.size();
   settings_cursors[1] = app_settings.wifi_password.size();
+  clear_log_confirmation = false;
   settings_open = true;
   select_settings_field(0);
   lv_obj_remove_flag(settings_root, LV_OBJ_FLAG_HIDDEN);
@@ -177,6 +183,7 @@ void open_settings() {
 }
 
 void close_settings(bool save) {
+  clear_log_confirmation = false;
   if (save) {
     const bool ok = settings_store_ready && settings_store.save(app_settings);
     if (ok) network_reconfigure_requested.store(true);
@@ -218,7 +225,13 @@ void handle_settings_key(const espp::M5StackCardputer::KeyEvent &event) {
       }
       break;
     case espp::M5StackCardputer::SpecialKey::ESC:
-      close_settings(false);
+      if (clear_log_confirmation) {
+        clear_log_confirmation = false;
+        refresh_settings_rows();
+        lv_label_set_text(settings_feedback_label, "Clear cancelled");
+      } else {
+        close_settings(false);
+      }
       break;
     default:
       break;
@@ -231,6 +244,19 @@ void handle_settings_key(const espp::M5StackCardputer::KeyEvent &event) {
   } else if (event.value == '\n' || event.value == '\r') {
     if (settings_active == 2) {
       close_settings(true);
+    } else if (settings_active == 3) {
+      if (!clear_log_confirmation) {
+        clear_log_confirmation = true;
+        refresh_settings_rows();
+        lv_label_set_text(settings_feedback_label, "ENTER again to CLEAR LOG");
+      } else {
+        const bool cleared = adif_log.clear();
+        clear_log_confirmation = false;
+        if (cleared) qso_count = 0;
+        refresh_settings_rows();
+        lv_label_set_text(settings_feedback_label,
+                          cleared ? "QSO LOG CLEARED" : "CLEAR FAILED - CHECK SD");
+      }
     } else {
       select_settings_field(settings_active + 1);
     }
@@ -486,11 +512,11 @@ void create_ui() {
   lv_obj_set_style_text_color(settings_title, lv_color_hex(0x000000), LV_PART_MAIN);
   lv_obj_align(settings_title, LV_ALIGN_TOP_MID, 0, 4);
 
-  constexpr std::array<const char *, 3> SETTINGS_NAMES = {"SSID", "PASS", "SAVE"};
+  constexpr std::array<const char *, 4> SETTINGS_NAMES = {"SSID", "PASS", "SAVE", "LOG"};
   for (size_t i = 0; i < settings_rows.size(); ++i) {
     settings_rows[i] = lv_obj_create(settings_root);
-    lv_obj_set_size(settings_rows[i], 228, 20);
-    lv_obj_set_pos(settings_rows[i], 6, 26 + static_cast<int>(i) * 24);
+    lv_obj_set_size(settings_rows[i], 228, 19);
+    lv_obj_set_pos(settings_rows[i], 6, 24 + static_cast<int>(i) * 21);
     lv_obj_set_style_radius(settings_rows[i], 0, LV_PART_MAIN);
     lv_obj_set_style_border_width(settings_rows[i], 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(settings_rows[i], 1, LV_PART_MAIN);
