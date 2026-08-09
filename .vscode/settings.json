@@ -3,7 +3,7 @@
   "idf.openOcdConfigs": [
     "board/esp32-wrover-kit-3.3v.cfg"
   ],
-  "idf.portWin": "detect",
+  "idf.portWin": "COM5",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32s3"
   },
@@ -12,5 +12,6 @@
     "--background-index",
     "--query-driver=**",
     "--compile-commands-dir=f:\\Own\\ESP_HAM\\ham_cw_logger_cardputer\\build"
-  ]
+  ],
+  "idf.flashType": "UART"
 }
